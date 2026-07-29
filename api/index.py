@@ -129,6 +129,12 @@ def health_check():
     }
 
 
+@app.get("/favicon.ico")
+@app.get("/favicon.png")
+def favicon():
+    return Response(status_code=204)
+
+
 @app.get("/webhook")
 @app.get("/zalo-webhook")
 async def zalo_webhook_get(request: Request):
