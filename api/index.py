@@ -158,7 +158,7 @@ async def zalo_webhook_post(request: Request, bg_tasks: BackgroundTasks):
     if photo_url and user_id != "unknown_user":
         # 1. Instant acknowledgment (0.05s)
         send_zalo_message(user_id, "📥 Đã nhận được ảnh của bạn! AI đang tự động xóa logo... ⏳")
-        # 2. Process and send photo reply in background task
-        bg_tasks.add_task(process_and_send_zalo_photo, photo_url, user_id)
+        # 2. Process and send photo reply synchronously before serverless freeze (< 0.5s)
+        process_and_send_zalo_photo(photo_url, user_id)
 
     return JSONResponse({"status": "received", "bot": "Zalo AI Watermark"})
