@@ -49,11 +49,13 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
         # Download image from Zalo
         r = requests.get(photo_url, timeout=10)
         if r.status_code != 200:
+            send_zalo_message(user_id, f"❌ Vercel Error: Tải ảnh thất bại (HTTP {r.status_code})")
             return
 
         img_array = np.frombuffer(r.content, np.uint8)
         img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
         if img is None:
+            send_zalo_message(user_id, "❌ Vercel Error: Giải mã ảnh thất bại (cv2.imdecode None)")
             return
 
         h, w = img.shape[:2]
@@ -95,6 +97,7 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
         # Encode clean image to JPEG memory buffer
         ok, encoded_buf = cv2.imencode(".jpg", clean_img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
         if not ok:
+            send_zalo_message(user_id, "❌ Vercel Error: Mã hóa JPEG thất bại (cv2.imencode None)")
             return
 
         # Upload to Catbox CDN with User-Agent header
@@ -109,11 +112,16 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
         if res_cdn.status_code == 200 and res_cdn.text.startswith("http"):
             cdn_url = res_cdn.text.strip()
             # Send photo back to Zalo user!
-            send_zalo_photo(
+            res_zalo = send_zalo_photo(
                 user_id,
                 cdn_url,
                 caption="✨ AI đã xóa logo xong nét căng 100%! Gửi bạn bức ảnh sạch hoàn hảo."
             )
+            if not res_zalo or not res_zalo.get("ok"):
+                desc = res_zalo.get("description", "Không rõ") if res_zalo else "Không phản hồi"
+                send_zalo_message(user_id, f"❌ Zalo sendPhoto Error: {desc}")
+        else:
+            send_zalo_message(user_id, f"❌ Vercel CDN Error: Upload thất bại (HTTP {res_cdn.status_code}): {res_cdn.text[:100]}")
 
     except Exception as err:
         import traceback
