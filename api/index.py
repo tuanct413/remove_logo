@@ -74,9 +74,14 @@ async def zalo_webhook_post(request: Request):
 
     if photo_url and user_id != "unknown_user":
         # 1. Instant acknowledgment (0.05s)
-        send_zalo_message(user_id, "📥 Đã nhận được ảnh! AI Cloud đang tự động xóa logo... ⏳")
+        send_zalo_message(user_id, "📥 Đã nhận được ảnh của bạn! AI Cloud đang tự động xóa logo... ⏳")
 
-        # 2. Cloud AI Inpainting API & Photo Reply via Cloud Server
-        # (Delegate 100% heavy processing to Cloud AI, keeping Vercel 100% idle & lightweight!)
+        # 2. Trigger 100% Cloud Inpainting
+        # Send photo_url & chat_id to Cloud Worker API
+        cloud_worker_url = os.environ.get("CLOUD_WORKER_URL", "https://unexacerbating-noninstrumentalistic-allyson.ngrok-free.dev/api/v1/auto-detect-mask")
+        try:
+            requests.post(cloud_worker_url, json={"photo_url": photo_url, "user_id": user_id}, timeout=3)
+        except Exception:
+            pass
 
     return JSONResponse({"status": "received", "bot": "Zalo AI Watermark"})
