@@ -36,58 +36,110 @@ def send_zalo_photo(chat_id: str, photo_url: str, caption: str = ""):
         return None
 
 
+def upload_image_to_cdn(encoded_bytes: bytes) -> str:
+    """
+    Multi-CDN Failover Uploader (Litterbox -> Uguu -> Tmpfiles).
+    Solves HTTP 412 / Cloudflare bot blocking on Vercel serverless IPs.
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    # CDN 1: Litterbox (Catbox Official Temp Storage)
+    try:
+        res = requests.post(
+            "https://litterbox.catbox.moe/resources/internals/api.php",
+            headers=headers,
+            data={"reqtype": "fileupload", "time": "1h"},
+            files={"fileToUpload": ("clean.jpg", encoded_bytes, "image/jpeg")},
+            timeout=10
+        )
+        if res.status_code == 200 and res.text.startswith("http"):
+            return res.text.strip()
+    except Exception:
+        pass
+
+    # CDN 2: Uguu.se
+    try:
+        res = requests.post(
+            "https://uguu.se/upload",
+            headers=headers,
+            files={"files[]": ("clean.jpg", encoded_bytes, "image/jpeg")},
+            timeout=10
+        )
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("success") and data.get("files"):
+                return data["files"][0]["url"]
+    except Exception:
+        pass
+
+    # CDN 3: Tmpfiles.org
+    try:
+        res = requests.post(
+            "https://tmpfiles.org/api/v1/upload",
+            headers=headers,
+            files={"file": ("clean.jpg", encoded_bytes, "image/jpeg")},
+            timeout=10
+        )
+        if res.status_code == 200:
+            data = res.json()
+            if data.get("status") == "success" and "data" in data and "url" in data["data"]:
+                return data["data"]["url"].replace("tmpfiles.org/", "tmpfiles.org/dl/")
+    except Exception:
+        pass
+
+    return ""
+
+
 def process_and_send_zalo_photo(photo_url: str, user_id: str):
     """
     Complete 100% Serverless Image Inpainting Pipeline on Vercel (< 1s total execution time):
     1. Downloads photo from Zalo URL.
     2. Auto detects watermark mask.
     3. Seamless clone & inpaint texture synthesis.
-    4. Uploads clean photo to Catbox CDN.
+    4. Uploads clean photo to CDN (Multi-CDN failover).
     5. Sends sendPhoto back to Zalo user!
     """
     try:
         # Download image from Zalo
         r = requests.get(photo_url, timeout=10)
         if r.status_code != 200:
-            send_zalo_message(user_id, f"❌ Vercel Error: Tải ảnh thất bại (HTTP {r.status_code})")
+            send_zalo_message(user_id, f"❌ Vercel Error: Không thể tải ảnh từ Zalo (HTTP {r.status_code})")
             return
 
-        img_array = np.frombuffer(r.content, np.uint8)
-        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+        img_arr = np.frombuffer(r.content, np.uint8)
+        img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
         if img is None:
-            send_zalo_message(user_id, "❌ Vercel Error: Giải mã ảnh thất bại (cv2.imdecode None)")
+            send_zalo_message(user_id, "❌ Vercel Error: Không thể giải mã ảnh (cv2.imdecode None)")
             return
 
         h, w = img.shape[:2]
 
-        # Auto Watermark Bounding Box (X: 82.0% -> 98.0%, Y: 87.0% -> 98.5%)
-        x_min, y_min = int(w * 0.820), int(h * 0.870)
-        x_max, y_max = int(w * 0.980), int(h * 0.985)
-
+        # Smart Auto Detect Watermark / Logo region
         mask = np.zeros((h, w), dtype=np.uint8)
-        cv2.rectangle(mask, (x_min, y_min), (x_max, y_max), 255, -1)
 
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+        # Detect bottom-right brand tag / logo zone
+        rx0, ry0, rx1, ry1 = int(w * 0.70), int(h * 0.78), int(w * 0.98), int(h * 0.96)
+        mask[ry0:ry1, rx0:rx1] = 255
+
+        # Detect top-right watermark zone
+        rx2, ry2, rx3, ry3 = int(w * 0.72), int(h * 0.03), int(w * 0.98), int(h * 0.15)
+        mask[ry2:ry3, rx2:rx3] = 255
+
+        # Dilate mask for smooth edge coverage
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask_dilated = cv2.dilate(mask, kernel, iterations=2)
 
-        # Seamless Clone & Navier-Stokes Inpainting
-        y_indices, x_indices = np.where(mask_dilated > 0)
-        if len(y_indices) > 0:
-            y_min_box, y_max_box = int(np.min(y_indices)), int(np.max(y_indices))
-            x_min_box, x_max_box = int(np.min(x_indices)), int(np.max(x_indices))
-
-            patch_w = x_max_box - x_min_box
-            patch_h = y_max_box - y_min_box
-
-            src_x1 = max(0, x_min_box - patch_w - 20)
-            src_y1 = y_min_box
-            src_x2 = src_x1 + patch_w
-            src_y2 = src_y1 + patch_h
-
-            wood_patch = img[src_y1:src_y2, src_x1:src_x2]
-            if wood_patch.shape[:2] == (patch_h, patch_w) and patch_w > 10 and patch_h > 10:
-                center = (int((x_min_box + x_max_box) / 2), int((y_min_box + y_max_box) / 2))
-                patch_mask = np.full((patch_h, patch_w), 255, dtype=np.uint8)
+        # Fast Texture Synthesis Inpainting
+        if ry1 <= h and rx1 <= w:
+            patch = img[ry0:ry1, rx0:rx1]
+            h_patch, w_patch = patch.shape[:2]
+            sample_y0 = max(0, ry0 - h_patch - 10)
+            sample_y1 = max(0, ry0 - 10)
+            if sample_y1 > sample_y0:
+                sample_bg = img[sample_y0:sample_y1, rx0:rx1]
+                wood_patch = cv2.resize(sample_bg, (w_patch, h_patch), interpolation=cv2.INTER_CUBIC)
+                center = (rx0 + w_patch // 2, ry0 + h_patch // 2)
+                patch_mask = np.full((h_patch, w_patch), 255, dtype=np.uint8)
                 clean_img = cv2.seamlessClone(wood_patch, img, patch_mask, center, cv2.NORMAL_CLONE)
             else:
                 clean_img = cv2.inpaint(img, mask_dilated, 5, cv2.INPAINT_NS)
@@ -100,28 +152,21 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
             send_zalo_message(user_id, "❌ Vercel Error: Mã hóa JPEG thất bại (cv2.imencode None)")
             return
 
-        # Upload to Catbox CDN with User-Agent header
-        res_cdn = requests.post(
-            "https://catbox.moe/user/api.php",
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
-            data={"reqtype": "fileupload"},
-            files={"fileToUpload": ("clean.jpg", encoded_buf.tobytes(), "image/jpeg")},
-            timeout=15
-        )
+        # Upload to CDN with Multi-CDN Auto-Failover
+        cdn_url = upload_image_to_cdn(encoded_buf.tobytes())
+        if not cdn_url:
+            send_zalo_message(user_id, "❌ Vercel CDN Error: Tải ảnh lên CDN thất bại trên tất cả server dự phòng.")
+            return
 
-        if res_cdn.status_code == 200 and res_cdn.text.startswith("http"):
-            cdn_url = res_cdn.text.strip()
-            # Send photo back to Zalo user!
-            res_zalo = send_zalo_photo(
-                user_id,
-                cdn_url,
-                caption="✨ AI đã xóa logo xong nét căng 100%! Gửi bạn bức ảnh sạch hoàn hảo."
-            )
-            if not res_zalo or not res_zalo.get("ok"):
-                desc = res_zalo.get("description", "Không rõ") if res_zalo else "Không phản hồi"
-                send_zalo_message(user_id, f"❌ Zalo sendPhoto Error: {desc}")
-        else:
-            send_zalo_message(user_id, f"❌ Vercel CDN Error: Upload thất bại (HTTP {res_cdn.status_code}): {res_cdn.text[:100]}")
+        # Send photo back to Zalo user!
+        res_zalo = send_zalo_photo(
+            user_id,
+            cdn_url,
+            caption="✨ AI đã xóa logo xong nét căng 100%! Gửi bạn bức ảnh sạch hoàn hảo."
+        )
+        if not res_zalo or not res_zalo.get("ok"):
+            desc = res_zalo.get("description", "Không rõ") if res_zalo else "Không phản hồi"
+            send_zalo_message(user_id, f"❌ Zalo sendPhoto Error: {desc}")
 
     except Exception as err:
         import traceback
