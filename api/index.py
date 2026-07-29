@@ -116,7 +116,9 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
             )
 
     except Exception as err:
-        print("❌ Error in Vercel inpainting pipeline:", err)
+        import traceback
+        tb = traceback.format_exc()
+        send_zalo_message(user_id, f"❌ Error on Vercel:\n{tb[:500]}")
 
 
 @app.get("/")
