@@ -188,37 +188,23 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
 
         h, w = img.shape[:2]
 
-        # Smart Auto Detect Watermark / Logo region
+        # Smart Auto Detect Watermark / Logo region (Tọa độ chính xác vùng logo)
         mask = np.zeros((h, w), dtype=np.uint8)
 
-        # Detect bottom-right brand tag / logo zone
-        rx0, ry0, rx1, ry1 = int(w * 0.70), int(h * 0.78), int(w * 0.98), int(h * 0.96)
+        # Detect bottom-right brand tag / logo zone (82% -> 98% W, 88% -> 98% H)
+        rx0, ry0, rx1, ry1 = int(w * 0.82), int(h * 0.88), int(w * 0.98), int(h * 0.98)
         mask[ry0:ry1, rx0:rx1] = 255
 
-        # Detect top-right watermark zone
-        rx2, ry2, rx3, ry3 = int(w * 0.72), int(h * 0.03), int(w * 0.98), int(h * 0.15)
+        # Detect top-right watermark zone (75% -> 98% W, 2% -> 12% H)
+        rx2, ry2, rx3, ry3 = int(w * 0.75), int(h * 0.02), int(w * 0.98), int(h * 0.12)
         mask[ry2:ry3, rx2:rx3] = 255
 
         # Dilate mask for smooth edge coverage
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         mask_dilated = cv2.dilate(mask, kernel, iterations=2)
 
-        # Fast Texture Synthesis Inpainting
-        if ry1 <= h and rx1 <= w:
-            patch = img[ry0:ry1, rx0:rx1]
-            h_patch, w_patch = patch.shape[:2]
-            sample_y0 = max(0, ry0 - h_patch - 10)
-            sample_y1 = max(0, ry0 - 10)
-            if sample_y1 > sample_y0:
-                sample_bg = img[sample_y0:sample_y1, rx0:rx1]
-                wood_patch = cv2.resize(sample_bg, (w_patch, h_patch), interpolation=cv2.INTER_CUBIC)
-                center = (rx0 + w_patch // 2, ry0 + h_patch // 2)
-                patch_mask = np.full((h_patch, w_patch), 255, dtype=np.uint8)
-                clean_img = cv2.seamlessClone(wood_patch, img, patch_mask, center, cv2.NORMAL_CLONE)
-            else:
-                clean_img = cv2.inpaint(img, mask_dilated, 5, cv2.INPAINT_NS)
-        else:
-            clean_img = cv2.inpaint(img, mask_dilated, 5, cv2.INPAINT_NS)
+        # Clean Telea Inpainting (Nội suy mượt từ nền sàn/tường xung quanh, không nhân bản tay/chân)
+        clean_img = cv2.inpaint(img, mask_dilated, 5, cv2.INPAINT_TELEA)
 
         # Encode clean image to JPEG memory buffer
         ok, encoded_buf = cv2.imencode(".jpg", clean_img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
