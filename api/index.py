@@ -97,9 +97,10 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
         if not ok:
             return
 
-        # Upload to Catbox CDN
+        # Upload to Catbox CDN with User-Agent header
         res_cdn = requests.post(
             "https://catbox.moe/user/api.php",
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
             data={"reqtype": "fileupload"},
             files={"fileToUpload": ("clean.jpg", encoded_buf.tobytes(), "image/jpeg")},
             timeout=15
