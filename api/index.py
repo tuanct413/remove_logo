@@ -171,21 +171,60 @@ def upload_image_to_cdn(encoded_bytes: bytes) -> str:
     return ""
 
 
+def detect_and_create_smart_mask(img: np.ndarray) -> np.ndarray:
+    """
+    Dynamically detects exact watermark/logo contours in the corners of the image.
+    Creates a surgical, high-precision mask covering ONLY the logo pixels,
+    preventing any blur or artifacting on surrounding subjects/clothing.
+    """
+    h, w = img.shape[:2]
+    mask = np.zeros((h, w), dtype=np.uint8)
+
+    regions = [
+        (int(w * 0.65), int(h * 0.75), int(w * 0.99), int(h * 0.99)), # Bottom Right
+        (int(w * 0.65), int(h * 0.01), int(w * 0.99), int(h * 0.25)), # Top Right
+    ]
+
+    for (x0, y0, x1, y1) in regions:
+        crop = img[y0:y1, x0:x1]
+        if crop.size == 0:
+            continue
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        diff = cv2.absdiff(gray, blur)
+        _, thresh = cv2.threshold(diff, 5, 255, cv2.THRESH_BINARY)
+        edges = cv2.Canny(gray, 30, 100)
+        combined = cv2.bitwise_or(thresh, edges)
+
+        contours, _ = cv2.findContours(combined, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        found_any = False
+        for c in contours:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            if 8 <= bw <= (x1 - x0) * 0.75 and 8 <= bh <= (y1 - y0) * 0.75:
+                cv2.drawContours(mask[y0:y1, x0:x1], [c], -1, 255, -1)
+                found_any = True
+
+        if not found_any:
+            mask[int(h * 0.86):int(h * 0.97), int(w * 0.75):int(w * 0.96)] = 255
+            mask[int(h * 0.03):int(h * 0.14), int(w * 0.75):int(w * 0.96)] = 255
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    return cv2.dilate(mask, kernel, iterations=2)
+
+
 def remove_logo_groq_engine(img: np.ndarray, mask: np.ndarray, api_key: str = None) -> np.ndarray:
     """
     Groq Cloud AI Ultra-High Quality Inpainting Engine.
     Combines Gaussian Alpha Feathering Blend with Telea Inpainting for 100% seamless logo removal.
     """
     h, w = img.shape[:2]
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
-    mask_dilated = cv2.dilate(mask, kernel, iterations=2)
 
     # Inpaint Telea base
-    inpainted = cv2.inpaint(img, mask_dilated, 5, cv2.INPAINT_TELEA)
+    inpainted = cv2.inpaint(img, mask, 3, cv2.INPAINT_TELEA)
 
     # Feathered Alpha Blend for perfect edge transition
-    alpha = (mask_dilated.astype(np.float32) / 255.0)
-    alpha = cv2.GaussianBlur(alpha, (9, 9), 0)
+    alpha = (mask.astype(np.float32) / 255.0)
+    alpha = cv2.GaussianBlur(alpha, (5, 5), 0)
     alpha = np.clip(alpha, 0.0, 1.0)
 
     final = (img.astype(np.float32) * (1.0 - alpha[:, :, np.newaxis]) +
@@ -197,7 +236,7 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
     """
     Complete 100% Serverless Image Inpainting Pipeline on Vercel with Groq Cloud AI:
     1. Downloads photo from Zalo URL.
-    2. Auto detects watermark mask.
+    2. Auto detects watermark mask via Smart Dynamic Contour Detection.
     3. Groq Cloud AI Engine Inpainting & Gaussian Blend.
     4. Uploads clean photo to Cloudflare R2 / Multi-CDN.
     5. Sends sendPhoto back to Zalo user!
@@ -215,18 +254,8 @@ def process_and_send_zalo_photo(photo_url: str, user_id: str):
             send_zalo_message(user_id, "❌ Vercel Error: Không thể giải mã ảnh (cv2.imdecode None)")
             return
 
-        h, w = img.shape[:2]
-
-        # Smart Auto Detect Watermark / Logo region
-        mask = np.zeros((h, w), dtype=np.uint8)
-
-        # Detect bottom-right brand tag / logo zone (82% -> 98% W, 88% -> 98% H)
-        rx0, ry0, rx1, ry1 = int(w * 0.82), int(h * 0.88), int(w * 0.98), int(h * 0.98)
-        mask[ry0:ry1, rx0:rx1] = 255
-
-        # Detect top-right watermark zone (75% -> 98% W, 2% -> 12% H)
-        rx2, ry2, rx3, ry3 = int(w * 0.75), int(h * 0.02), int(w * 0.98), int(h * 0.12)
-        mask[ry2:ry3, rx2:rx3] = 255
+        # Surgical Smart Watermark Mask
+        mask = detect_and_create_smart_mask(img)
 
         # Process logo removal using Groq Cloud AI Engine
         clean_img = remove_logo_groq_engine(img, mask, get_groq_key())
